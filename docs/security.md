@@ -6,7 +6,7 @@ The local SDK requires an application-supplied credential encryption provider. T
 
 Pass `credentialEncryption` to `createChatGPT`. The provider implements the exported `CredentialEncryption` interface: a stable provider ID, an availability check, and encryption/decryption operations. See the [Electron adapter](../examples/paste-perfect/electron/credential-encryption.ts) for an example. Other local runtimes must provide their own OS-backed implementation.
 
-The encrypted payload includes access and refresh tokens, the saved ID token, registration data, and account labels. The store uses an interprocess lock, atomic file replacement, and owner-only file and directory permissions on Unix. A separate `chatgpt-host.json` file contains the runtime's non-secret identifier and is not encrypted.
+The encrypted payload includes access and refresh tokens, the saved ID token, registration data, and account labels. The store uses an interprocess lock, atomic file replacement, and owner-only file and directory permissions on Unix. A separate `chatgpt-host.json` file contains the runtime's non-secret UUID identifier and is not encrypted. Opt-in agent host private keys are stored only inside the encrypted connection state.
 
 When a refresh returns a new ID token, the SDK saves the rotated credentials in an encrypted pending state before verifying that identity. If the signing-key service is temporarily unavailable, authenticated requests stop and return a retryable error. A later request resumes verification from the saved state, including after an app restart, without reusing the consumed refresh token. Pending credentials become usable only after verification succeeds.
 
@@ -15,6 +15,27 @@ Existing valid plaintext connection files migrate in place on their first read. 
 Migration does not erase pre-existing backups, filesystem snapshots, or files quarantined by earlier versions. OS encryption protects saved data at rest; it does not protect against code already running inside the trusted application process. Integrators must keep the provider and decrypted credentials out of renderer processes, logs, and telemetry.
 
 Disconnect removes the selected profile's tokens and ID token from the encrypted state while retaining its registration and account label. The SDK attempts remote revocation separately and reports when it cannot confirm revocation.
+
+## Agent host key proof
+
+Enable `agentHostKeyProof: true` in `createChatGPT` only when your authorization provider supports proof at both code exchange and refresh:
+
+```ts
+const chatgpt = createChatGPT({
+  appName: "My app",
+  appId: "my-app",
+  redirectPort: 0,
+  credentialEncryption, // Your existing OS-backed provider.
+  agentHostKeyProof: true,
+});
+await chatgpt.signIn();
+```
+
+The SDK generates one P-256 key per storage directory and encrypts it before opening the browser. The public key's JWK-thumbprint URI becomes `ext_agent_host_id`; this option includes the ID even if `sendHostId` is false. The private key never appears in session metadata, profile lists, browser URLs, or request headers. Each token request carries an ES256 `DPoP` proof containing the public JWK, a fresh `jti`, `iat`, `htm: POST`, and the discovered token endpoint as `htu`. Code exchange includes `authorization_code_hash`; refresh includes `refresh_token_hash`. Both hashes are SHA-256 over the exact decoded UTF-8 credential, encoded as unpadded base64url.
+
+Every successful token response must acknowledge the same identity in `ext_verified_agent_host_id` before replacement credentials are saved. Missing or mismatched acknowledgements fail with `host_key_proof_unacknowledged`; the previous profile remains intact. Proof rejection never triggers a retry without proof. API requests continue using bearer access tokens; this option does not implement sender-constrained API access tokens.
+
+The option defaults to false. Existing UUID profiles keep their current refresh behavior until a successful explicit sign-in with this option migrates them. Migration preserves their client registration and the existing UUID file. Once a profile uses a key, refresh and future sign-in keep requiring that key even if the option is later disabled. Disconnect removes tokens but retains the key and profile identity. Back up and restore the encrypted state with its OS encryption provider; missing or mismatched keys fail instead of generating a replacement for a keyed profile. Do not export or log private keys.
 
 ## Application boundaries
 

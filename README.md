@@ -17,6 +17,8 @@ Follow the [Paste Perfect cookbook](https://developers.openai.com/cookbook/artic
 
 Use `@siwc/local` in your app's local Node.js process for sign-in and API requests, and `@siwc/react` for the UI. Import `@siwc/react/styles.css` once. Both packages are local workspaces in this repository; [Paste Perfect](examples/paste-perfect) shows how to connect them, including [OS-encrypted credential storage](docs/security.md).
 
+For providers that support agent key proof, see the [opt-in integration and key lifecycle](docs/security.md#agent-host-key-proof).
+
 ## What's included
 
 | Folder | Contents |

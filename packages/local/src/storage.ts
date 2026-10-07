@@ -6,6 +6,7 @@ import { setTimeout as delay } from "node:timers/promises";
 import lockfile from "proper-lockfile";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { ChatGPTError, isObject } from "./errors.js";
+import { agentHostIdPattern, validateAgentHostKey } from "./agent-host-key.js";
 import type { CredentialEncryption, StoredConnection, StoredState } from "./types.js";
 
 const MAX_FILE_BYTES = 2 * 1024 * 1024;
@@ -21,6 +22,9 @@ function validateRecord(value: unknown): StoredConnection {
     throw new ChatGPTError("storage_invalid", "Saved ChatGPT credentials could not be read. Restore the credential file before signing in.");
   }
   if (value.subject !== undefined && typeof value.subject !== "string") throw new ChatGPTError("storage_invalid", "Saved ChatGPT identity is invalid. Restore the credential file before signing in.");
+  if (value.agentHostId !== undefined && (typeof value.agentHostId !== "string" || !agentHostIdPattern.test(value.agentHostId))) {
+    throw new ChatGPTError("host_identity_invalid", "The saved agent host identity is invalid. Restore the encrypted credential file before signing in.");
+  }
   if (value.identity !== undefined && (!isObject(value.identity) ||
       (value.identity.name !== undefined && typeof value.identity.name !== "string") ||
       (value.identity.email !== undefined && typeof value.identity.email !== "string"))) {
@@ -54,6 +58,7 @@ function validateRecord(value: unknown): StoredConnection {
 function validateState(value: unknown): StoredState {
   const invalid = () => new ChatGPTError("storage_invalid", "Saved ChatGPT profiles could not be read. Restore the credential file before signing in.");
   if (!isObject(value) || value.version !== 2 || !Array.isArray(value.profiles) || !Array.isArray(value.pendingRegistrations)) throw invalid();
+  if (value.agentHostKey !== undefined) validateAgentHostKey(value.agentHostKey);
   const entries = [...value.profiles, ...value.pendingRegistrations];
   const ids = new Set<string>();
   const labels = new Set<string>();
@@ -62,6 +67,7 @@ function validateState(value: unknown): StoredState {
         typeof entry.label !== "string" || !entry.label.trim() || entry.label.length > 120 || /[\u0000-\u001f]/.test(entry.label) ||
         typeof entry.clientId !== "string" || !/^[a-zA-Z0-9_-]{1,200}$/.test(entry.clientId) || entry.clientId === "dynamic_agent_client" ||
         typeof entry.savedAt !== "string" || ids.has(entry.id) || labels.has(entry.label)) throw invalid();
+    if (entry.agentHostId !== undefined && (typeof entry.agentHostId !== "string" || !agentHostIdPattern.test(entry.agentHostId))) throw invalid();
     ids.add(entry.id);
     labels.add(entry.label);
   }
@@ -217,6 +223,9 @@ export class ConnectionStore {
     }
     if (!isObject(value) || value.version !== 2) {
       throw new ChatGPTError("storage_encrypted_invalid", "The saved credential format is not supported. Restore the file or use the app version that created it. Saved credentials have been preserved.");
+    }
+    if (value.agentHostKey !== undefined) {
+      throw new ChatGPTError("storage_encrypted_invalid", "Agent host keys must be stored in the encrypted credential file. Restore the encrypted file before signing in.");
     }
     const migrated = validateState(value);
     await this.write(migrated);

@@ -65,6 +65,12 @@ export interface ChatGPTConfig {
    * Enable only when the authorization provider supports ext_agent_host_id.
    */
   sendHostId?: boolean;
+  /**
+   * Opt in to a persisted agent key on explicit sign-in. Requires provider support
+   * for key proof at both code exchange and refresh. Existing keyed profiles keep
+   * requiring proof even when this option is later disabled. Defaults to false.
+   */
+  agentHostKeyProof?: boolean;
 }
 
 export interface ResponseInputMessage {
@@ -131,6 +137,8 @@ export interface StoredConnection {
   profileIdToken?: string;
   credentials?: StoredCredentials;
   pendingRefresh?: PendingRefresh;
+  /** A successful key-proof sign-in permanently selects proof for this profile. */
+  agentHostId?: string;
 }
 
 export interface StoredProfile extends StoredConnection {
@@ -144,6 +152,16 @@ export interface PendingRegistration {
   label: string;
   clientId: string;
   savedAt: string;
+  agentHostId?: string;
+}
+
+/** Internal private key material; persist only inside the encrypted state. */
+export interface StoredAgentHostKey {
+  kty: "EC";
+  crv: "P-256";
+  x: string;
+  y: string;
+  d: string;
 }
 
 export interface StoredState {
@@ -151,4 +169,5 @@ export interface StoredState {
   activeProfileId?: string;
   profiles: StoredProfile[];
   pendingRegistrations: PendingRegistration[];
+  agentHostKey?: StoredAgentHostKey;
 }
