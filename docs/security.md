@@ -6,7 +6,19 @@ The local SDK requires an application-supplied credential encryption provider. T
 
 Pass `credentialEncryption` to `createChatGPT`. The provider implements the exported `CredentialEncryption` interface: a stable provider ID, an availability check, and encryption/decryption operations. See the [Electron adapter](../examples/paste-perfect/electron/credential-encryption.ts) for an example. Other local runtimes must provide their own OS-backed implementation.
 
-The encrypted payload includes access and refresh tokens, the saved ID token, registration data, and account labels. The store uses an interprocess lock, atomic file replacement, and owner-only file and directory permissions on Unix. A separate `chatgpt-host.json` file contains the runtime's non-secret identifier and is not encrypted.
+The encrypted payload includes access and refresh tokens, the saved ID token, registration data, and account labels. The store uses an interprocess lock, atomic file replacement, and owner-only file and directory permissions on Unix. A separate `chatgpt-host.json` file contains the runtime's non-secret UUID identifier and is not encrypted. Key binding uses `chatgpt-host-key.json`, which encrypts the installation's P-256 private key with the same provider; neither the key nor signed proofs are exposed to renderers.
+
+## Agent key binding demo
+
+Set `keyBinding: true` in `createChatGPT` to use an installation key pair for new sign-ins. This implies sending `ext_agent_host_id`, derived from the public key as a canonical SHA-256 JWK thumbprint URI. Paste Perfect enables this option. The server must support and enable agent key verification for the account/client: a successful token response without the exact `ext_verified_agent_host_id` acknowledgement is rejected, never treated as verified.
+
+The SDK sends an ES256 DPoP proof to the canonical `https://auth.openai.com/api/accounts/oauth/token` endpoint for code exchange and refresh. Each proof has a fresh identifier and timestamp, binds the HTTP method and URL, and hashes the exact presented code or refresh token. The public JWK is included; the private key remains local. Access tokens remain Bearer tokens, and API requests do not acquire a DPoP requirement. Key possession proves control of the declared host key, not the publisher's identity or the trustworthiness of its software.
+
+Existing UUID profiles retain their credentials and registration. Reconnect each profile with `signIn({ profileId })` to establish its key binding through a fresh authorization; merely enabling the option or refreshing an old session does not upgrade it. Other profiles and the legacy UUID file remain unchanged. Once a profile is bound, later refreshes and sign-ins continue using its key even if the option is disabled. A missing, damaged, or mismatched key stops refresh without silently creating a replacement. Restore the original key, or explicitly sign in again to establish a new binding. Cancelled or failed upgrades preserve the prior profile.
+
+For a legacy comparison, use a separate storage directory with `keyBinding: false, sendHostId: true`. Do not remove a bound profile's stored identity to bypass key proof. The tests use synthetic keys and tokens; they do not establish live server rollout status.
+
+## Refresh and migration
 
 When a refresh returns a new ID token, the SDK saves the rotated credentials in an encrypted pending state before verifying that identity. If the signing-key service is temporarily unavailable, authenticated requests stop and return a retryable error. A later request resumes verification from the saved state, including after an app restart, without reusing the consumed refresh token. Pending credentials become usable only after verification succeeds.
 

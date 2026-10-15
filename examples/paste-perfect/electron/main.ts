@@ -34,6 +34,7 @@ const chatgpt = createChatGPT({
   redirectPort: Number(process.env.PASTE_PERFECT_REDIRECT_PORT ?? 8787),
   storageDir: join(app.getPath('userData'), 'chatgpt'),
   credentialEncryption: createElectronCredentialEncryption(safeStorage, () => app.isReady()),
+  keyBinding: true,
   openBrowser: async (url: string) => {
     const target = new URL(url);
     if (target.origin !== 'https://auth.openai.com') throw new Error('Unexpected sign-in destination.');

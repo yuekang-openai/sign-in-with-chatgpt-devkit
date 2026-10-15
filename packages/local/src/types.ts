@@ -65,6 +65,8 @@ export interface ChatGPTConfig {
    * Enable only when the authorization provider supports ext_agent_host_id.
    */
   sendHostId?: boolean;
+  /** Bind new sign-ins to this installation's encrypted key pair. Requires server key-proof support. Implies sendHostId. */
+  keyBinding?: boolean;
 }
 
 export interface ResponseInputMessage {
@@ -131,6 +133,8 @@ export interface StoredConnection {
   profileIdToken?: string;
   credentials?: StoredCredentials;
   pendingRefresh?: PendingRefresh;
+  /** Set only after the server acknowledges this key on a fresh sign-in. */
+  agentHostId?: string;
 }
 
 export interface StoredProfile extends StoredConnection {
