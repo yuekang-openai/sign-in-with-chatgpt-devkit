@@ -104,18 +104,19 @@ export function createChatGPT(config: ChatGPTConfig): ChatGPTClient {
           signal.throwIfAborted();
           // Finish and persist rotation even if the calling request is cancelled.
           // Otherwise cancellation could discard the sole valid replacement token.
+          const hostKey = profile.agentHostId ? await store.getHostKey() : undefined;
           const refreshed = await refreshConnection(profile, AbortSignal.timeout(60_000), async (rotation) => {
             profile = { ...profile!, pendingRefresh: rotation, savedAt: new Date().toISOString() };
             saved.profiles = saved.profiles.map((entry) => entry.id === profile!.id ? profile! : entry);
             await store.write(saved);
-          });
+          }, hostKey);
           // Do not merge the pending checkpoint back into the verified result.
           profile = { ...refreshed, id: profile.id, label: profile.label, ...(profile.requiresNewRegistration ? { requiresNewRegistration: true } : {}) };
           saved.profiles = saved.profiles.map((entry) => entry.id === profile!.id ? profile! : entry);
           await store.write(saved);
         } catch (error) {
           const typed = asError(error);
-          if (requiresReauthentication(typed) || ["invalid_id_token", "invalid_token_response", "account_mismatch"].includes(typed.code)) {
+          if (requiresReauthentication(typed) || ["invalid_id_token", "invalid_token_response", "account_mismatch", "host_key_not_verified"].includes(typed.code)) {
             const invalid = withoutCredentials(profile, "reauth_required");
             saved.profiles = saved.profiles.map((entry) => entry.id === invalid.id ? invalid : entry);
             await store.write(saved);
@@ -191,8 +192,9 @@ export function createChatGPT(config: ChatGPTConfig): ChatGPTClient {
           if (profile?.requiresNewRegistration) throw new ChatGPTError("registration_upgrade_required", "This connection was registered with the older localhost callback. Add an account to register the new 127.0.0.1 callback. Your existing connection is preserved.");
           const label = profile?.label ?? pending?.label ?? connectionLabel(saved, options.label);
           // Persist the runtime identity before any browser authorization, including cancelled attempts.
-          const hostId = await store.getHostId();
-          return { id, label, profile, previous: profile ?? (pending ? pendingConnection(pending) : undefined), hostId, activeProfileId: saved.activeProfileId };
+          const hostKey = config.keyBinding || profile?.agentHostId ? await store.getHostKey(true) : undefined;
+          const hostId = hostKey?.id ?? await store.getHostId();
+          return { id, label, profile, previous: profile ?? (pending ? pendingConnection(pending) : undefined), hostId, hostKey, activeProfileId: saved.activeProfileId };
         }, signal);
         let previous = prepared.previous;
         let issuedClientId = previous?.clientId;
@@ -201,6 +203,7 @@ export function createChatGPT(config: ChatGPTConfig): ChatGPTClient {
           try {
             record = await authorize(config, previous, prepared.hostId, signal, {
               reconsent: options.reconsent,
+              hostKey: prepared.hostKey,
               onRegistration: async (clientId) => {
                 issuedClientId = clientId;
                 await store.withLock(async () => {
