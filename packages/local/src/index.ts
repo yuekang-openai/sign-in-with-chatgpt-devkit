@@ -69,6 +69,7 @@ export function createChatGPT(config: ChatGPTConfig): ChatGPTClient {
   if (!Number.isInteger(config.redirectPort) || config.redirectPort < 0 || config.redirectPort > 65535) throw new ChatGPTError("invalid_config", "Provide a valid loopback redirect port, or 0 to select an available port.");
   if (config.storageDir && !isAbsolute(config.storageDir)) throw new ChatGPTError("invalid_config", "ChatGPT storageDir must be an absolute path.");
   if (config.sendHostId !== undefined && typeof config.sendHostId !== "boolean") throw new ChatGPTError("invalid_config", "sendHostId must be a boolean enabled only for a compatible authorization deployment.");
+  if (config.keyBinding !== undefined && typeof config.keyBinding !== "boolean") throw new ChatGPTError("invalid_config", "keyBinding must be a boolean enabled only for a compatible authorization deployment.");
   const store = new ConnectionStore(config.storageDir ?? join(homedir(), ".config", config.appId), config.credentialEncryption);
   const subscribers = new Set<(state: SessionState) => void>();
   const requests = new Set<AbortController>();

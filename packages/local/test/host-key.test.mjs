@@ -58,6 +58,11 @@ function legacyState() {
     { ...profile, id: 'profile-2', label: 'Other account', clientId: 'other_registered_client' }], pendingRegistrations: [] };
 }
 
+test('a string configuration value cannot accidentally enable key binding', async (t) => {
+  const { config } = await fixture(t);
+  assert.throws(() => createChatGPT({ ...config, keyBinding: 'false' }), { code: 'invalid_config' });
+});
+
 async function callback(authorization) {
   const url = new URL(authorization.searchParams.get('redirect_uri'));
   url.searchParams.set('state', authorization.searchParams.get('state'));
