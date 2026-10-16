@@ -12,6 +12,7 @@ import { generateHostKey } from '../dist/host-key.js';
 
 const issuer = 'https://auth.openai.com';
 const endpoint = `${issuer}/api/accounts/oauth/token`;
+const discoveryEndpoint = `${issuer}/oauth/token`;
 const prefix = 'urn:ietf:params:oauth:jwk-thumbprint:sha-256:';
 const clientId = 'key_demo_client';
 const subject = 'key-demo-subject';
@@ -91,7 +92,7 @@ function mockServer(t, context, { acknowledgement = 'valid', failCodeOnce = fals
   } };
   t.mock.method(globalThis, 'fetch', async (url, options) => {
     if (url === `${issuer}/.well-known/openid-configuration`) {
-      return Response.json({ issuer, authorization_endpoint: `${issuer}/authorize`, token_endpoint: endpoint, jwks_uri: `${issuer}/jwks` });
+      return Response.json({ issuer, authorization_endpoint: `${issuer}/authorize`, token_endpoint: discoveryEndpoint, jwks_uri: `${issuer}/jwks` });
     }
     if (url === `${issuer}/jwks`) return Response.json(jwks);
     if (url === endpoint) {
@@ -138,6 +139,39 @@ function mockServer(t, context, { acknowledgement = 'valid', failCodeOnce = fals
   return { config, proofs, authorization: () => authorization };
 }
 
+test('enabling key binding leaves an existing UUID session unbound during refresh', async (t) => {
+  const context = await fixture(t);
+  const legacy = legacyState();
+  legacy.profiles[0].credentials.expiresAt = 1;
+  const uuid = await context.store.withLock(async () => { await context.store.write(legacy); return context.store.getHostId(); });
+  let refreshes = 0;
+  t.mock.method(globalThis, 'fetch', async (url, options) => {
+    if (url === `${issuer}/.well-known/openid-configuration`) {
+      return Response.json({ issuer, authorization_endpoint: `${issuer}/authorize`, token_endpoint: discoveryEndpoint, jwks_uri: `${issuer}/jwks` });
+    }
+    if (url === discoveryEndpoint) {
+      refreshes++;
+      assert.equal(options.body.get('grant_type'), 'refresh_token');
+      assert.equal(options.body.get('refresh_token'), 'legacy-refresh');
+      assert.equal(options.headers.DPoP, undefined);
+      return Response.json({ access_token: 'refreshed-legacy-access', refresh_token: 'refreshed-legacy-refresh', token_type: 'Bearer', expires_in: 3600 });
+    }
+    if (url === 'https://api.openai.com/v1/models') {
+      assert.equal(options.headers.authorization, 'Bearer refreshed-legacy-access');
+      return Response.json({ models: [] });
+    }
+    assert.fail(`Unexpected request: ${url}`);
+  });
+  await createChatGPT(context.config).listModels();
+  const saved = await context.store.withLock(() => context.store.read());
+  assert.equal(refreshes, 1);
+  assert.equal(saved.profiles[0].agentHostId, undefined);
+  assert.equal(saved.profiles[0].clientId, clientId);
+  assert.equal(await context.store.withLock(() => context.store.getHostId()), uuid);
+  assert.deepEqual(saved.profiles[1], legacy.profiles[1]);
+  await assert.rejects(readFile(context.filename), { code: 'ENOENT' });
+});
+
 test('fresh sign-in upgrades one UUID profile and uses its encrypted key after restart, even with keyBinding disabled', async (t) => {
   const context = await fixture(t);
   const legacy = legacyState();
@@ -159,8 +193,39 @@ test('fresh sign-in upgrades one UUID profile and uses its encrypted key after r
   await restarted.listModels();
   assert.equal(server.proofs.length, 2);
   assert.equal(server.proofs[1].hostId, server.proofs[0].hostId);
+  assert.deepEqual(server.proofs.map((proof) => proof.htu), [endpoint, endpoint]);
   assert.equal((await restarted.getSession()).status, 'connected');
   assert.equal(JSON.stringify(await restarted.listProfiles()).includes('privateJwk'), false);
+  await restarted.signIn({ profileId: 'profile-1' });
+  assert.equal(server.proofs.length, 3);
+  assert.equal(server.proofs[2].hostId, server.proofs[0].hostId);
+  const reconnected = await context.store.withLock(() => context.store.read());
+  assert.equal(reconnected.profiles.find((profile) => profile.id === 'profile-1').agentHostId, upgraded.agentHostId);
+});
+
+test('only an explicit sign-in replaces a missing key for a bound profile', async (t) => {
+  const context = await fixture(t);
+  const host = await context.store.withLock(() => context.store.getHostKey(true));
+  const legacy = legacyState();
+  legacy.profiles[0].agentHostId = host.id;
+  legacy.profiles[0].credentials.expiresAt = 1;
+  await context.store.withLock(() => context.store.write(legacy));
+  await rm(context.filename);
+  const server = mockServer(t, context);
+  const client = createChatGPT(server.config);
+  await assert.rejects(client.listModels(), { code: 'host_key_unavailable' });
+  assert.equal(server.proofs.length, 0);
+  assert.deepEqual(await context.store.withLock(() => context.store.read()), legacy);
+  await assert.rejects(readFile(context.filename), { code: 'ENOENT' });
+  await client.signIn({ profileId: 'profile-1' });
+  const saved = await context.store.withLock(() => context.store.read());
+  const recovered = saved.profiles.find((profile) => profile.id === 'profile-1');
+  assert.equal(server.proofs.length, 1);
+  assert.notEqual(recovered.agentHostId, host.id);
+  assert.equal(recovered.agentHostId, server.proofs[0].hostId);
+  assert.equal(recovered.clientId, clientId);
+  assert.equal(recovered.status, 'connected');
+  assert.deepEqual(saved.profiles.find((profile) => profile.id === 'profile-2'), legacy.profiles[1]);
 });
 
 test('code retry retains the issued registration and host key but signs a fresh proof', async (t) => {
