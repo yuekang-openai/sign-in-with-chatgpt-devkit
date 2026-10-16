@@ -6,6 +6,7 @@ import { setTimeout as delay } from "node:timers/promises";
 import lockfile from "proper-lockfile";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { ChatGPTError, isObject } from "./errors.js";
+import { generateHostKey, isHostKeyId, validateHostKey, type AgentHostKey } from "./host-key.js";
 import type { CredentialEncryption, StoredConnection, StoredState } from "./types.js";
 
 const MAX_FILE_BYTES = 2 * 1024 * 1024;
@@ -21,6 +22,9 @@ function validateRecord(value: unknown): StoredConnection {
     throw new ChatGPTError("storage_invalid", "Saved ChatGPT credentials could not be read. Restore the credential file before signing in.");
   }
   if (value.subject !== undefined && typeof value.subject !== "string") throw new ChatGPTError("storage_invalid", "Saved ChatGPT identity is invalid. Restore the credential file before signing in.");
+  if (value.agentHostId !== undefined && (typeof value.agentHostId !== "string" || !isHostKeyId(value.agentHostId))) {
+    throw new ChatGPTError("storage_invalid", "Saved ChatGPT agent identity is invalid. Restore the credential file before signing in.");
+  }
   if (value.identity !== undefined && (!isObject(value.identity) ||
       (value.identity.name !== undefined && typeof value.identity.name !== "string") ||
       (value.identity.email !== undefined && typeof value.identity.email !== "string"))) {
@@ -79,6 +83,7 @@ export class ConnectionStore {
   readonly #filename: string;
   readonly #lock: string;
   readonly #hostFilename: string;
+  readonly #hostKeyFilename: string;
   readonly #encryption: CredentialEncryption;
   readonly #context = new AsyncLocalStorage<{ compromised: boolean }>();
 
@@ -92,6 +97,7 @@ export class ConnectionStore {
     this.#filename = join(directory, "chatgpt-auth.json");
     this.#lock = join(directory, ".chatgpt-auth.lock");
     this.#hostFilename = join(directory, "chatgpt-host.json");
+    this.#hostKeyFilename = join(directory, "chatgpt-host-key.json");
   }
 
   async #prepare(): Promise<void> {
@@ -180,26 +186,32 @@ export class ConnectionStore {
     }
   }
 
+  async #decrypt(value: Record<string, unknown>): Promise<unknown> {
+    if (typeof value.provider !== "string" || typeof value.ciphertext !== "string" || !value.ciphertext ||
+        Buffer.from(value.ciphertext, "base64").toString("base64") !== value.ciphertext) {
+      throw new ChatGPTError("storage_encrypted_invalid", "The encrypted credential file is damaged. Restore the file before signing in. Saved credentials have been preserved.");
+    }
+    if (value.provider !== this.#encryption.id) {
+      throw new ChatGPTError("storage_provider_mismatch", "Use the credential encryption provider that created this file. Saved credentials have been preserved.");
+    }
+    try {
+      const plaintext = await this.#encryption.decrypt(Buffer.from(value.ciphertext, "base64"));
+      if (typeof plaintext !== "string") throw new Error("Invalid decryption result");
+      return JSON.parse(plaintext) as unknown;
+    } catch {
+      throw new ChatGPTError("storage_decryption_failed", "Saved credentials could not be decrypted. Restore access to your OS credential store or restore the credential file. Saved credentials have been preserved.");
+    }
+  }
+
   async read(): Promise<StoredState | undefined> {
     this.#assertLocked();
     await this.#requireEncryption();
     const value = await this.#readFile(this.#filename);
     if (value === undefined) return undefined;
     if (isObject(value) && value.version === 3) {
-      if (typeof value.provider !== "string" || typeof value.ciphertext !== "string" || !value.ciphertext ||
-          Buffer.from(value.ciphertext, "base64").toString("base64") !== value.ciphertext) {
-        throw new ChatGPTError("storage_encrypted_invalid", "The encrypted credential file is damaged. Restore the file before signing in. Saved credentials have been preserved.");
-      }
-      if (value.provider !== this.#encryption.id) {
-        throw new ChatGPTError("storage_provider_mismatch", "Use the credential encryption provider that created this file. Saved credentials have been preserved.");
-      }
-      try {
-        const plaintext = await this.#encryption.decrypt(Buffer.from(value.ciphertext, "base64"));
-        if (typeof plaintext !== "string") throw new Error("Invalid decryption result");
-        return validateState(JSON.parse(plaintext) as unknown);
-      } catch {
-        throw new ChatGPTError("storage_decryption_failed", "Saved credentials could not be decrypted. Restore access to your OS credential store or restore the credential file. Saved credentials have been preserved.");
-      }
+      const decrypted = await this.#decrypt(value);
+      try { return validateState(decrypted); }
+      catch { throw new ChatGPTError("storage_decryption_failed", "Saved credentials could not be decrypted. Restore access to your OS credential store or restore the credential file. Saved credentials have been preserved."); }
     }
     if (isObject(value) && value.version === 1) {
       // Old registrations used localhost. Preserve usable credentials, but never
@@ -247,18 +259,36 @@ export class ConnectionStore {
     return value.id;
   }
 
+  /** Create only for explicit sign-in; a missing key must never silently change a bound session. */
+  async getHostKey(create = false): Promise<AgentHostKey> {
+    this.#assertLocked();
+    await this.#requireEncryption();
+    const value = await this.#readFile(this.#hostKeyFilename);
+    if (value === undefined) {
+      if (!create) throw new ChatGPTError("host_key_unavailable", "The agent key is missing. Restore it or sign in again to create a new connection.");
+      const host = await generateHostKey();
+      await this.#writeFile(this.#hostKeyFilename, { version: 1, provider: this.#encryption.id, ciphertext: await this.#encrypt(host) });
+      return host;
+    }
+    if (!isObject(value) || value.version !== 1) throw new ChatGPTError("host_identity_invalid", "The saved agent key is invalid. Restore chatgpt-host-key.json before signing in.");
+    return validateHostKey(await this.#decrypt(value));
+  }
+
+  async #encrypt(value: unknown): Promise<string> {
+    try {
+      const ciphertext = await this.#encryption.encrypt(JSON.stringify(value));
+      if (!(ciphertext instanceof Uint8Array) || ciphertext.byteLength === 0) throw new Error("Invalid encryption result");
+      return Buffer.from(ciphertext).toString("base64");
+    } catch {
+      throw new ChatGPTError("storage_encryption_failed", "ChatGPT credentials could not be encrypted. Check your OS credential store and try again. Saved credentials have been preserved.", true);
+    }
+  }
+
   async write(record: StoredState): Promise<void> {
     this.#assertLocked();
     await this.#requireEncryption();
     validateState(record);
-    let ciphertext: Uint8Array;
-    try {
-      ciphertext = await this.#encryption.encrypt(JSON.stringify(record));
-      if (!(ciphertext instanceof Uint8Array) || ciphertext.byteLength === 0) throw new Error("Invalid encryption result");
-    } catch {
-      throw new ChatGPTError("storage_encryption_failed", "ChatGPT credentials could not be encrypted. Check your OS credential store and try again. Saved credentials have been preserved.", true);
-    }
-    await this.#writeFile(this.#filename, { version: 3, provider: this.#encryption.id, ciphertext: Buffer.from(ciphertext).toString("base64") });
+    await this.#writeFile(this.#filename, { version: 3, provider: this.#encryption.id, ciphertext: await this.#encrypt(record) });
   }
 
   async #writeFile(filename: string, value: unknown): Promise<void> {

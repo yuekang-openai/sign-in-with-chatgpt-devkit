@@ -4,6 +4,7 @@ import { spawn } from "node:child_process";
 import { setTimeout as delay } from "node:timers/promises";
 import { createRemoteJWKSet, customFetch, jwtVerify } from "jose";
 import { apiError, ChatGPTError, fetchRemote, isObject, jsonResponse } from "./errors.js";
+import { createHostKeyProof, HOST_KEY_TOKEN_ENDPOINT, type AgentHostKey } from "./host-key.js";
 import type { ChatGPTConfig, PendingRefresh, StoredConnection, StoredCredentials } from "./types.js";
 
 const ISSUER = "https://auth.openai.com";
@@ -107,18 +108,21 @@ async function verifyIdentity(idToken: string, clientId: string, nonce?: string,
   }
 }
 
-async function tokenRequest(body: URLSearchParams, signal: AbortSignal): Promise<Record<string, unknown>> {
+async function tokenRequest(body: URLSearchParams, signal: AbortSignal, host?: AgentHostKey): Promise<Record<string, unknown>> {
   const config = await discovery();
   signal.throwIfAborted();
-  const response = await fetchRemote(config.token_endpoint, {
+  const response = await fetchRemote(host ? HOST_KEY_TOKEN_ENDPOINT : config.token_endpoint, {
     method: "POST",
-    headers: { "content-type": "application/x-www-form-urlencoded", accept: "application/json" },
+    headers: { "content-type": "application/x-www-form-urlencoded", accept: "application/json", ...(host ? { DPoP: await createHostKeyProof(host, body) } : {}) },
     body,
     signal,
   });
   const data = await jsonResponse(response);
   if (!response.ok) throw apiError(data, response.status, response.headers.get("x-request-id"));
   if (!isObject(data)) throw new ChatGPTError("invalid_token_response", "ChatGPT returned an invalid token response. Please sign in again.");
+  if (host && data.ext_verified_agent_host_id !== host.id) {
+    throw new ChatGPTError("host_key_not_verified", "ChatGPT did not confirm this agent's key. Sign in again after key verification is available.");
+  }
   return data;
 }
 
@@ -249,6 +253,7 @@ interface AuthorizationOptions {
   reconsent?: boolean;
   /** Save the issued registration separately before the one-time code exchange. */
   onRegistration?: (clientId: string) => Promise<void>;
+  hostKey?: AgentHostKey;
 }
 
 export async function authorize(
@@ -277,7 +282,7 @@ export async function authorize(
       code_challenge_method: "S256",
       code_challenge: createHash("sha256").update(verifier).digest("base64url"),
     }).toString();
-    if (config.sendHostId) authorization.searchParams.set("ext_agent_host_id", hostId);
+    if (options.hostKey || config.sendHostId) authorization.searchParams.set("ext_agent_host_id", options.hostKey?.id ?? hostId);
     if (!previous?.clientId) authorization.searchParams.set("agent_name_hint", config.appName);
     // Keep saved tokens out of browser URLs, which default openers expose in
     // process arguments. The verified subject check below binds saved profiles.
@@ -295,7 +300,7 @@ export async function authorize(
       code_verifier: verifier,
       redirect_uri: listener.redirectUri,
       resource: RESOURCE,
-    }), signal);
+    }), signal, options.hostKey);
     if (typeof data.id_token !== "string") throw new ChatGPTError("invalid_id_token", "ChatGPT did not return a verifiable identity. Please try signing in again.");
     const identity = await verifyIdentity(data.id_token, callback.clientId, nonce);
     if (previous?.subject && identity.subject !== previous.subject) {
@@ -308,6 +313,7 @@ export async function authorize(
       status: "connected",
       savedAt: new Date().toISOString(),
       profileIdToken: data.id_token,
+      ...(options.hostKey ? { agentHostId: options.hostKey.id } : {}),
       ...identity,
       ...tokenFields(data),
     };
@@ -320,7 +326,11 @@ export async function refreshConnection(
   previous: StoredConnection,
   signal: AbortSignal,
   persistRotation: (rotation: PendingRefresh) => Promise<void>,
+  host?: AgentHostKey,
 ): Promise<StoredConnection> {
+  if (previous.agentHostId && host?.id !== previous.agentHostId) {
+    throw new ChatGPTError("host_key_unavailable", "The agent key does not match this connection. Restore it or sign in again.");
+  }
   let rotation = previous.pendingRefresh;
   let fields: ReturnType<typeof tokenFields>;
   if (rotation) {
@@ -334,7 +344,7 @@ export async function refreshConnection(
       client_id: previous.clientId,
       refresh_token: previous.credentials.refreshToken,
       resource: RESOURCE,
-    }), signal);
+    }), signal, previous.agentHostId ? host : undefined);
     // OAuth may omit scope on refresh when the previously granted scopes are unchanged.
     fields = tokenFields({ ...data, scope: data.scope ?? previous.scopes.join(" ") }, true);
     if (data.id_token !== undefined && (typeof data.id_token !== "string" || !data.id_token)) {

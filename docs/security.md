@@ -6,7 +6,17 @@ The local SDK requires an application-supplied credential encryption provider. T
 
 Pass `credentialEncryption` to `createChatGPT`. The provider implements the exported `CredentialEncryption` interface: a stable provider ID, an availability check, and encryption/decryption operations. See the [Electron adapter](../examples/paste-perfect/electron/credential-encryption.ts) for an example. Other local runtimes must provide their own OS-backed implementation.
 
-The encrypted payload includes access and refresh tokens, the saved ID token, registration data, and account labels. The store uses an interprocess lock, atomic file replacement, and owner-only file and directory permissions on Unix. A separate `chatgpt-host.json` file contains the runtime's non-secret identifier and is not encrypted.
+The encrypted payload includes access and refresh tokens, the saved ID token, registration data, and account labels. The store uses an interprocess lock, atomic file replacement, and owner-only file and directory permissions on Unix. A separate `chatgpt-host.json` file contains the runtime's non-secret UUID identifier and is not encrypted.
+
+## Agent key binding
+
+Set `keyBinding: true` to use a SHA-256 JWK thumbprint URI as `ext_agent_host_id` and sign code-exchange and refresh requests. This requires server key-verification support: `ext_verified_agent_host_id` must match the submitted host ID. Access tokens remain Bearer tokens.
+
+The installation's P-256 private key is stored in `chatgpt-host-key.json`, encrypted through `credentialEncryption`.
+
+Reconnect UUID profiles with `signIn({ profileId })` to enable binding. Bound profiles require their key even if the option is disabled. Refresh never regenerates a missing key; explicit sign-in does. Restore damaged or mismatched key files before retrying.
+
+## Refresh and migration
 
 When a refresh returns a new ID token, the SDK saves the rotated credentials in an encrypted pending state before verifying that identity. If the signing-key service is temporarily unavailable, authenticated requests stop and return a retryable error. A later request resumes verification from the saved state, including after an app restart, without reusing the consumed refresh token. Pending credentials become usable only after verification succeeds.
 
