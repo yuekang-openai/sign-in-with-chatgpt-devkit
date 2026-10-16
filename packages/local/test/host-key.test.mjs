@@ -8,7 +8,7 @@ import test from 'node:test';
 import { decodeProtectedHeader, exportJWK, generateKeyPair, importJWK, jwtVerify, SignJWT } from 'jose';
 import { createChatGPT } from '../dist/index.js';
 import { ConnectionStore } from '../dist/storage.js';
-import { generateHostKey } from '../dist/host-key.js';
+import { generateHostKey, isHostKeyId } from '../dist/host-key.js';
 
 const issuer = 'https://auth.openai.com';
 const endpoint = `${issuer}/api/accounts/oauth/token`;
@@ -21,6 +21,14 @@ const refreshToken = 'rt.1.exact+refresh/with=unicode-π';
 const { privateKey, publicKey } = await generateKeyPair('RS256');
 const jwks = { keys: [{ ...await exportJWK(publicKey), kid: 'host-test-key', use: 'sig', alg: 'RS256' }] };
 const digest = (value) => createHash('sha256').update(value, 'utf8').digest('base64url');
+
+test('host IDs require a canonical SHA-256 thumbprint URI', () => {
+  const thumbprint = 'A'.repeat(43);
+  assert.equal(isHostKeyId(prefix + thumbprint), true);
+  for (const value of [thumbprint, prefix + 'A'.repeat(42), prefix + thumbprint + '=', prefix + 'A'.repeat(42) + 'B']) {
+    assert.equal(isHostKeyId(value), false);
+  }
+});
 
 // Synthetic authenticated encryption; production supplies an OS-backed provider.
 function encryption() {

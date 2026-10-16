@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
-import { calculateJwkThumbprint, exportJWK, generateKeyPair, importJWK, SignJWT, jwtVerify, type JWK } from "jose";
+import { calculateJwkThumbprintUri, exportJWK, generateKeyPair, importJWK, SignJWT, jwtVerify, type JWK } from "jose";
 import { ChatGPTError, isObject } from "./errors.js";
 
 export const HOST_KEY_PREFIX = "urn:ietf:params:oauth:jwk-thumbprint:sha-256:";
@@ -15,28 +15,31 @@ function publicJwk(key: JWK): JWK {
   return { kty: "EC", crv: "P-256", x: key.x, y: key.y };
 }
 
+function isBase64url32(value: unknown): value is string {
+  if (typeof value !== "string") return false;
+  const bytes = Buffer.from(value, "base64url");
+  return bytes.length === 32 && bytes.toString("base64url") === value;
+}
+
 export function isHostKeyId(value: string): boolean {
-  if (!value.startsWith(HOST_KEY_PREFIX)) return false;
-  const thumbprint = value.slice(HOST_KEY_PREFIX.length);
-  return /^[A-Za-z0-9_-]{43}$/.test(thumbprint) && Buffer.from(thumbprint, "base64url").toString("base64url") === thumbprint;
+  return value.startsWith(HOST_KEY_PREFIX) && isBase64url32(value.slice(HOST_KEY_PREFIX.length));
 }
 
 export async function generateHostKey(): Promise<AgentHostKey> {
-  const { privateKey } = await generateKeyPair("ES256", { extractable: true });
-  const privateJwk = await exportJWK(privateKey);
-  return { id: HOST_KEY_PREFIX + await calculateJwkThumbprint(publicJwk(privateJwk)), privateJwk };
+  const { privateKey, publicKey } = await generateKeyPair("ES256", { extractable: true });
+  return { id: await calculateJwkThumbprintUri(publicKey), privateJwk: await exportJWK(privateKey) };
 }
 
 export async function validateHostKey(value: unknown): Promise<AgentHostKey> {
   try {
-    if (!isObject(value) || typeof value.id !== "string" || !isHostKeyId(value.id) || !isObject(value.privateJwk)) throw new Error();
+    if (!isObject(value) || typeof value.id !== "string" || !isObject(value.privateJwk)) throw new Error();
     const jwk = value.privateJwk;
-    if (Object.keys(jwk).sort().join(",") !== "crv,d,kty,x,y" || jwk.kty !== "EC" || jwk.crv !== "P-256" ||
-        ![jwk.d, jwk.x, jwk.y].every((part) => typeof part === "string" && /^[A-Za-z0-9_-]{43}$/.test(part) && Buffer.from(part, "base64url").toString("base64url") === part)) throw new Error();
+    if (jwk.kty !== "EC" || jwk.crv !== "P-256" || Object.keys(jwk).length !== 5 ||
+        ![jwk.d, jwk.x, jwk.y].every(isBase64url32)) throw new Error();
     const publicKey = publicJwk(jwk);
-    if (value.id !== HOST_KEY_PREFIX + await calculateJwkThumbprint(publicKey)) throw new Error();
-    // Import alone need not establish that the supplied public and private values match.
-    const challenge = await new SignJWT({ challenge: randomUUID() }).setProtectedHeader({ alg: "ES256" }).sign(await importJWK(jwk, "ES256"));
+    if (value.id !== await calculateJwkThumbprintUri(publicKey)) throw new Error();
+    // Check key-pair consistency independently of the runtime's JWK importer.
+    const challenge = await new SignJWT({}).setProtectedHeader({ alg: "ES256" }).sign(await importJWK(jwk, "ES256"));
     await jwtVerify(challenge, await importJWK(publicKey, "ES256"), { algorithms: ["ES256"] });
     return { id: value.id, privateJwk: jwk };
   } catch {
@@ -51,9 +54,9 @@ export async function createHostKeyProof(host: AgentHostKey, body: URLSearchPara
   return new SignJWT({
     htm: "POST",
     htu: HOST_KEY_TOKEN_ENDPOINT,
-    iat: Math.floor(Date.now() / 1000),
-    jti: randomUUID(),
     [code ? "authorization_code_hash" : "refresh_token_hash"]: createHash("sha256").update(credential, "utf8").digest("base64url"),
   }).setProtectedHeader({ alg: "ES256", typ: "dpop+jwt", jwk: publicJwk(host.privateJwk) })
+    .setIssuedAt()
+    .setJti(randomUUID())
     .sign(await importJWK(host.privateJwk, "ES256"));
 }

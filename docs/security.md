@@ -6,17 +6,15 @@ The local SDK requires an application-supplied credential encryption provider. T
 
 Pass `credentialEncryption` to `createChatGPT`. The provider implements the exported `CredentialEncryption` interface: a stable provider ID, an availability check, and encryption/decryption operations. See the [Electron adapter](../examples/paste-perfect/electron/credential-encryption.ts) for an example. Other local runtimes must provide their own OS-backed implementation.
 
-The encrypted payload includes access and refresh tokens, the saved ID token, registration data, and account labels. The store uses an interprocess lock, atomic file replacement, and owner-only file and directory permissions on Unix. A separate `chatgpt-host.json` file contains the runtime's non-secret UUID identifier and is not encrypted. Key binding uses `chatgpt-host-key.json`, which encrypts the installation's P-256 private key with the same provider; neither the key nor signed proofs are exposed to renderers.
+The encrypted payload includes access and refresh tokens, the saved ID token, registration data, and account labels. The store uses an interprocess lock, atomic file replacement, and owner-only file and directory permissions on Unix. A separate `chatgpt-host.json` file contains the runtime's non-secret UUID identifier and is not encrypted.
 
-## Agent key binding demo
+## Agent key binding
 
-Set `keyBinding: true` in `createChatGPT` to use an installation key pair for new sign-ins. This implies sending `ext_agent_host_id`, derived from the public key as a canonical SHA-256 JWK thumbprint URI. Paste Perfect enables this option. The server must support and enable agent key verification for the account/client: a successful token response without the exact `ext_verified_agent_host_id` acknowledgement is rejected, never treated as verified.
+Set `keyBinding: true` to use a SHA-256 JWK thumbprint URI as `ext_agent_host_id` and sign code-exchange and refresh requests. This requires server key-verification support: `ext_verified_agent_host_id` must match the submitted host ID. Access tokens remain Bearer tokens.
 
-The SDK sends an ES256 DPoP proof to the canonical `https://auth.openai.com/api/accounts/oauth/token` endpoint for code exchange and refresh. Each proof has a fresh identifier and timestamp, binds the HTTP method and URL, and hashes the exact presented code or refresh token. The public JWK is included; the private key remains local. Access tokens remain Bearer tokens, and API requests do not acquire a DPoP requirement. Key possession proves control of the declared host key, not the publisher's identity or the trustworthiness of its software.
+The installation's P-256 private key is stored in `chatgpt-host-key.json`, encrypted through `credentialEncryption`.
 
-Existing UUID profiles retain their credentials and registration. Reconnect each profile with `signIn({ profileId })` to establish its key binding through a fresh authorization; merely enabling the option or refreshing an old session does not upgrade it. Other profiles and the legacy UUID file remain unchanged. Once a profile is bound, later refreshes and sign-ins continue using its key even if the option is disabled. A missing, damaged, or mismatched key stops refresh without silently creating a replacement. Restore the original key when it is damaged or mismatched. If the key file is missing, explicitly signing in again creates a new key and establishes a new binding for that profile. An unreadable existing key file is never overwritten by sign-in. Cancelled or failed upgrades preserve the prior profile.
-
-For a legacy comparison, use a separate storage directory with `keyBinding: false, sendHostId: true`. Do not remove a bound profile's stored identity to bypass key proof. The tests use synthetic keys and tokens; they do not establish live server rollout status.
+Reconnect UUID profiles with `signIn({ profileId })` to enable binding. Bound profiles require their key even if the option is disabled. Refresh never regenerates a missing key; explicit sign-in does. Restore damaged or mismatched key files before retrying.
 
 ## Refresh and migration
 
